@@ -1,17 +1,22 @@
-import { Game } from './components/Game';
+import { Game, Model } from "./components/Game";
+import { gateway } from 'ai';
 
-export default function Home() {
+export default async function Home() {
+  let availableModels: Model[] = [];
+  try {
+    const models = await gateway.getAvailableModels();
+    availableModels = models.models.map(m => ({
+      id: m.id,
+      name: m.name || m.id,
+    }));
+  } catch (error) {
+    console.error("Failed to fetch models:", error);
+  }
+
   return (
-    <main className="min-h-screen bg-black text-zinc-100 p-4 md:p-8">
+    <main className="min-h-screen bg-black text-zinc-100">
       <div className="max-w-7xl mx-auto">
-        <div className="mb-8">
-          <h1 className="text-4xl font-black tracking-tighter mb-2 bg-gradient-to-r from-indigo-400 to-cyan-400 bg-clip-text text-transparent">
-            LLM BATTLESNAKE
-          </h1>
-          <p className="text-zinc-400">4 AI Agents fight for survival.</p>
-        </div>
-
-        <Game />
+        <Game availableModels={availableModels} />
       </div>
     </main>
   );

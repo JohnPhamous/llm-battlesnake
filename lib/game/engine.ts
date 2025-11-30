@@ -16,12 +16,12 @@ const DEFAULT_CONFIG: GameConfig = {
 };
 
 const SNAKE_COLORS = [
-  "#FF0000", // Red
-  "#00FF00", // Green
-  "#0000FF", // Blue
-  "#FFFF00", // Yellow
-  "#FF00FF", // Magenta
-  "#00FFFF", // Cyan
+  "#FFAF00",
+  "#00AD3A",
+  "#9440D5",
+  "#006FFE",
+  "#F12B83",
+  "#00A996",
 ];
 
 export class GameEngine {
@@ -61,6 +61,7 @@ export class GameEngine {
         color: SNAKE_COLORS[index % SNAKE_COLORS.length],
         status: "alive",
         length: 1,
+        latency: [],
       };
     });
 
@@ -168,7 +169,7 @@ export class GameEngine {
       posToSnakes.get(key)!.push(snake.id);
     });
 
-    posToSnakes.forEach((ids, key) => {
+    posToSnakes.forEach((ids) => {
       if (ids.length > 1) {
         const involveSnakes = ids.map(
           (id) => this.state.snakes.find((s) => s.id === id)!
@@ -197,7 +198,14 @@ export class GameEngine {
     const eatenFoodIndices: number[] = [];
 
     this.state.snakes = this.state.snakes.map((snake) => {
-      if (snake.status === "eliminated") return snake;
+      const move = moves.find((m) => m.snakeId === snake.id);
+      const newLatency = [...snake.latency];
+      if (move?.latency !== undefined) {
+        newLatency.push(move.latency);
+      }
+
+      if (snake.status === "eliminated")
+        return { ...snake, latency: newLatency };
 
       if (toEliminate.has(snake.id)) {
         return {
@@ -205,12 +213,13 @@ export class GameEngine {
           status: "eliminated",
           eliminationReason: eliminationReasons.get(snake.id),
           health: 0,
+          latency: newLatency,
         };
       }
 
       const nextBody = nextBodies.get(snake.id)!;
       const eats = eatsFood.get(snake.id);
-      let health = snake.health - 1;
+      let health = snake.health - 10;
       let length = snake.length;
 
       if (eats) {
@@ -231,6 +240,7 @@ export class GameEngine {
           eliminationReason: "starvation",
           health: 0,
           length,
+          latency: newLatency,
         };
       }
 
@@ -239,6 +249,7 @@ export class GameEngine {
         body: nextBody,
         health,
         length,
+        latency: newLatency,
       };
     });
 
@@ -284,6 +295,13 @@ export class GameEngine {
 
     if (Math.random() < this.config.foodSpawnChance) {
       this.addRandomFood();
+    }
+  }
+
+  public updateSnakeModel(snakeId: string, model: string) {
+    const snake = this.state.snakes.find((s) => s.id === snakeId);
+    if (snake) {
+      snake.model = model;
     }
   }
 

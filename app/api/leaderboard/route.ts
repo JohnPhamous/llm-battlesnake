@@ -49,7 +49,7 @@ export async function POST(req: Request) {
     results.forEach((r: any) => pipe.zscore(KEY, r.model));
     const scores = await pipe.exec() as (number | null)[]; // array of scores
 
-    const currentElos = results.map((r: any, i: number) => ({
+    const currentElos: { model: string; elo: number; rank: number }[] = results.map((r: any, i: number) => ({
       model: r.model,
       elo: scores[i] ?? 1200,
       rank: r.rank
@@ -58,7 +58,6 @@ export async function POST(req: Request) {
     // Update ELOs
     // Simple pairwise
     const K = 32;
-    const newElos = { ...currentElos.map(c => c.elo) }; // Copy to track changes? No, map by index.
 
     // We need to accumulate changes
     const updates = new Map<string, number>();

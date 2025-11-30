@@ -26,6 +26,7 @@ export interface Snake {
   status: SnakeStatus;
   eliminationReason?: EliminationReason;
   length: number; // Score/Length
+  latency: number[]; // Array of latency measurements in ms
 }
 
 export interface GameConfig {
@@ -50,6 +51,7 @@ export interface GameState {
 export interface Move {
   snakeId: string;
   direction: Direction;
+  latency?: number;
 }
 
 export interface MoveRequest {
@@ -61,4 +63,19 @@ export interface MoveRequest {
 export interface MoveResponse {
   move: Direction;
   reason: string;
+}
+
+export interface LogEntry {
+  id: string;
+  turn: number;
+  timestamp: number;
+  snakeId?: string;
+  type: 'move' | 'death' | 'win' | 'info';
+  message: string;
+  data?: {
+    move?: Direction;
+    reason?: string;
+    eliminationReason?: EliminationReason;
+    winnerId?: string;
+  };
 }

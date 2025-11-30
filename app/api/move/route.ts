@@ -1,14 +1,75 @@
-import { gateway, generateObject } from "ai";
+import { generateObject } from "ai";
 import { z } from "zod";
-import { MoveRequest } from "@/lib/game/types";
 
 export const maxDuration = 10; // Function timeout
+
+// Schemas for validation
+const PointSchema = z.object({
+  x: z.number(),
+  y: z.number(),
+});
+
+const EliminationReasonSchema = z.enum([
+  "self-collision",
+  "body-collision",
+  "head-to-head-collision",
+  "out-of-bounds",
+  "starvation",
+  "timeout",
+  "manual",
+]);
+
+const SnakeSchema = z.object({
+  id: z.string(),
+  name: z
+    .string()
+    .max(50)
+    .regex(
+      /^[\w\s-]+$/,
+      "Name can only contain letters, numbers, spaces, and hyphens"
+    ), // Prevent prompt injection via special chars
+  model: z.string(),
+  body: z.array(PointSchema),
+  health: z.number(),
+  color: z.string(),
+  status: z.enum(["alive", "eliminated"]),
+  eliminationReason: EliminationReasonSchema.optional(),
+  length: z.number(),
+  latency: z.array(z.number()),
+});
+
+const GameStateSchema = z.object({
+  id: z.string(),
+  turn: z.number(),
+  snakes: z.array(SnakeSchema),
+  food: z.array(PointSchema),
+  width: z.number(),
+  height: z.number(),
+  isGameOver: z.boolean(),
+  winnerId: z.string().optional(),
+});
+
+const MoveRequestSchema = z.object({
+  gameState: GameStateSchema,
+  you: SnakeSchema,
+  model: z.string().optional(),
+});
 
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const { gameState, you } = body as MoveRequest;
-    const model = body.model || "openai/gpt-4o-mini"; // Default to gpt-4o-mini
+
+    // Validate the request body
+    const parseResult = MoveRequestSchema.safeParse(body);
+    if (!parseResult.success) {
+      return Response.json(
+        { error: "Invalid request body", details: parseResult.error },
+        { status: 400 }
+      );
+    }
+
+    const { gameState, you, model: requestModel } = parseResult.data;
+    const model = requestModel || "openai/gpt-4o-mini"; // Default to gpt-4o-mini
 
     // Calculate relative directions and immediate hazards for better context
     const head = you.body[0];
@@ -51,7 +112,18 @@ export async function POST(req: Request) {
 
     const prompt = `
       Role: You are a strategic Snake game agent.
-      Goal: Survive longer than all other snakes.
+      Goal: Survive longer than all other snakes. You are playing against other snakes in the game Snake.
+
+      --- Rules ---
+      1. Movement: You must move one square at a time (up, down, left, right). You cannot move backwards into your own neck.
+      2. Survival: Avoid walls, your own body, and other snakes' bodies.
+      3. Growing: Eating food (at specific coordinates) increases your length by 1 and resets your health to 100.
+      4. Health: Your health decreases by 1 every turn. If it hits 0, you starve and die.
+      5. Head-to-Head: If you collide head-to-head with another snake:
+         - If you are longer, you survive and they are eliminated.
+         - If you are shorter, you are eliminated.
+         - If lengths are equal, both are eliminated.
+      6. Winning: Be the last snake standing.
 
       --- Game State ---
       Board: ${gameState.width}x${gameState.height} grid.
@@ -83,17 +155,7 @@ export async function POST(req: Request) {
         neck ? formatPoint(neck) : ""
       } is always fatal).
 
-      --- Strategy ---
-      1. SAFETY (Priority #1): ONLY choose from Valid Safe Moves.
-      2. AGGRESSION & GROWTH (Priority #2):
-         - If you are larger than a nearby opponent, hunt them! Cut them off or collide Head-to-Head to eliminate them.
-         - Eat food aggressively to maintain size advantage, even if health is high.
-      3. TRAPPING: Box opponents in against walls or other snakes to force them to crash.
-      4. CAUTION: Only avoid Head-to-Head collisions if the opponent is LARGER or EQUAL size.
-
-      BE AGGRESSIVE. Do not just wander aimlessly.
-
-      Calculate the next move.
+      Calculate the next move to maximize survival and chances of winning.
 
       Response Format (JSON):
       {

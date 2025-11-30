@@ -1,36 +1,57 @@
-'use client';
+"use client";
 
-import React, { useEffect, useRef, useState } from 'react';
-import { GameEngine } from '@/lib/game/engine';
-import { GameState, Move } from '@/lib/game/types';
-import { Board } from './Board';
-import { Leaderboard } from './Leaderboard';
+import React, { useEffect, useRef, useState } from "react";
+import { GameEngine } from "@/lib/game/engine";
+import { GameState, Move, LogEntry } from "@/lib/game/types";
+import { Board } from "./Board";
+import { Leaderboard } from "./Leaderboard";
 
 const AVAILABLE_MODELS = [
-  'moonshotai/kimi-k2-0905',
-  'alibaba/qwen-3-32b'
+  "moonshotai/kimi-k2-0905",
+  "alibaba/qwen-3-32b",
+  "openai/gpt-oss-safeguard-20b",
+  "google/gemini-2.0-flash-lite",
 ];
 
+export interface Model {
+  id: string;
+  name: string;
+}
+
+interface GameProps {
+  availableModels?: Model[];
+}
+
 // Assign random models to players
-const getRandomModels = (count: number) => {
+const getRandomModels = (count: number, models: string[]) => {
   return Array.from({ length: count }, (_, i) => ({
     id: `snake-${i + 1}`,
-    model: AVAILABLE_MODELS[Math.floor(Math.random() * AVAILABLE_MODELS.length)]
+    model: models[i],
   }));
 };
 
-export function Game() {
+export function Game({ availableModels = [] }: GameProps) {
   const engine = useRef(new GameEngine());
   const [gameState, setGameState] = useState<GameState | null>(null);
   const [isRunning, setIsRunning] = useState(false);
-  const [speed, setSpeed] = useState(500);
+  const [speed] = useState(50);
   const [isProcessingTurn, setIsProcessingTurn] = useState(false);
-  const [logs, setLogs] = useState<string[]>([]);
-  const [leaderboardData, setLeaderboardData] = useState<{ model: string; score: number }[]>([]);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [leaderboardData, setLeaderboardData] = useState<
+    { model: string; score: number }[]
+  >([]);
+  const [thinkingSnakes, setThinkingSnakes] = useState<Set<string>>(new Set());
+  const [lastLatencies, setLastLatencies] = useState<Record<string, number>>(
+    {}
+  );
+
+  // const modelIds = React.useMemo(() =>
+  //   availableModels.length > 0 ? availableModels.map(m => m.id) : AVAILABLE_MODELS,
+  // [availableModels]);
 
   const fetchLeaderboard = React.useCallback(async () => {
     try {
-      const res = await fetch('/api/leaderboard');
+      const res = await fetch("/api/leaderboard");
       if (res.ok) {
         setLeaderboardData(await res.json());
       }
@@ -42,39 +63,52 @@ export function Game() {
   useEffect(() => {
     fetchLeaderboard();
 
-    const players = getRandomModels(4);
+    // Always use AVAILABLE_MODELS for initial state to keep defaults consistent
+    // as requested by user. The user can then switch to other models via dropdown.
+    const players = getRandomModels(4, AVAILABLE_MODELS);
     engine.current.initializeGame(players);
     setGameState(engine.current.getState());
-  }, [fetchLeaderboard]);
+  }, [fetchLeaderboard]); // Remove modelIds dependency to avoid re-init on prop change if we want stable defaults
 
-  const addLog = (msg: string) => {
-    setLogs(prev => [`[Turn ${engine.current.getState().turn}] ${msg}`, ...prev].slice(0, 50));
+  const addLog = (entry: Partial<LogEntry>) => {
+    const newLog: LogEntry = {
+      id: crypto.randomUUID(),
+      turn: engine.current.getState().turn,
+      timestamp: Date.now(),
+      type: "info",
+      message: "",
+      ...entry,
+    };
+    setLogs((prev) => [newLog, ...prev].slice(0, 200));
   };
 
-  const reportResults = React.useCallback(async (finalState: GameState) => {
-    // Calculate ranks
-    const results = finalState.snakes.map(s => {
-      let rank = 2;
-      if (finalState.winnerId === s.id) rank = 1;
-      else if (s.status === 'eliminated') rank = 3;
+  const reportResults = React.useCallback(
+    async (finalState: GameState) => {
+      // Calculate ranks
+      const results = finalState.snakes.map((s) => {
+        let rank = 2;
+        if (finalState.winnerId === s.id) rank = 1;
+        else if (s.status === "eliminated") rank = 3;
 
-      return {
-        model: s.model,
-        rank
-      };
-    });
-
-    try {
-      await fetch('/api/leaderboard', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ results })
+        return {
+          model: s.model,
+          rank,
+        };
       });
-      fetchLeaderboard();
-    } catch (e) {
-      console.error('Failed to report results', e);
-    }
-  }, [fetchLeaderboard]);
+
+      try {
+        await fetch("/api/leaderboard", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ results }),
+        });
+        fetchLeaderboard();
+      } catch (e) {
+        console.error("Failed to report results", e);
+      }
+    },
+    [fetchLeaderboard]
+  );
 
   const runTurn = React.useCallback(async () => {
     if (isProcessingTurn || !gameState || gameState.isGameOver) {
@@ -84,9 +118,11 @@ export function Game() {
 
     setIsProcessingTurn(true);
 
-    const currentSnakes = gameState.snakes.filter(s => s.status === 'alive');
+    const currentSnakes = gameState.snakes.filter((s) => s.status === "alive");
+    setThinkingSnakes(new Set(currentSnakes.map((s) => s.id)));
 
     const movePromises = currentSnakes.map(async (snake) => {
+      const startTime = Date.now();
       try {
         const controller = new AbortController();
         // Allow turn time slightly less than total speed if speed > 1s, else fixed
@@ -95,43 +131,83 @@ export function Game() {
         // but individual moves shouldn't take forever.
         const timeoutId = setTimeout(() => controller.abort(), 10000);
 
-        const res = await fetch('/api/move', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+        const res = await fetch("/api/move", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ gameState, you: snake, model: snake.model }),
-          signal: controller.signal
+          signal: controller.signal,
         });
 
         clearTimeout(timeoutId);
+        const endTime = Date.now();
+        const latency = endTime - startTime;
 
-        if (!res.ok) throw new Error('API failed');
+        setLastLatencies((prev) => ({ ...prev, [snake.id]: latency }));
+
+        setThinkingSnakes((prev) => {
+          const next = new Set(prev);
+          next.delete(snake.id);
+          return next;
+        });
+
+        if (!res.ok) throw new Error("API failed");
 
         const data = await res.json();
-        return { snakeId: snake.id, direction: data.move, reason: data.reason } as Move & { reason?: string };
+        return {
+          snakeId: snake.id,
+          direction: data.move,
+          reason: data.reason,
+          latency,
+        } as Move & { reason?: string };
       } catch {
         // console.error(`Snake ${snake.id} failed:`, error);
+        setThinkingSnakes((prev) => {
+          const next = new Set(prev);
+          next.delete(snake.id);
+          return next;
+        });
         return null;
       }
     });
 
     const results = await Promise.all(movePromises);
-    const validMoves = results.filter((m): m is Move & { reason?: string } => m !== null);
+    const validMoves = results.filter(
+      (m): m is Move & { reason?: string } => m !== null
+    );
 
     engine.current.nextTurn(validMoves);
     const newState = engine.current.getState();
 
     // Log moves/events
-    validMoves.forEach(m => {
-      const snake = newState.snakes.find(s => s.id === m.snakeId);
-      if (snake && snake.status === 'alive') {
-        addLog(`${snake.name}: ${m.direction} ${m.reason ? `(${m.reason})` : ''}`);
+    validMoves.forEach((m) => {
+      const snake = newState.snakes.find((s) => s.id === m.snakeId);
+      if (snake) {
+        // Log even if dead this turn
+        addLog({
+          snakeId: snake.id,
+          type: "move",
+          message: `${snake.name} moved ${m.direction}`,
+          data: {
+            move: m.direction,
+            reason: m.reason,
+          },
+        });
       }
     });
 
-    newState.snakes.forEach(s => {
-      const oldSnake = gameState.snakes.find(os => os.id === s.id);
-      if (s.status === 'eliminated' && oldSnake?.status === 'alive') {
-        addLog(`${s.name} died: ${s.eliminationReason}`);
+    newState.snakes.forEach((s) => {
+      const oldSnake = gameState.snakes.find((os) => os.id === s.id);
+      if (s.status === "eliminated" && oldSnake?.status === "alive") {
+        const move = validMoves.find((m) => m.snakeId === s.id);
+        addLog({
+          snakeId: s.id,
+          type: "death",
+          message: `${s.name} died: ${s.eliminationReason}`,
+          data: {
+            eliminationReason: s.eliminationReason,
+            reason: move?.reason,
+          },
+        });
       }
     });
 
@@ -139,174 +215,225 @@ export function Game() {
 
     if (newState.isGameOver) {
       setIsRunning(false);
-      const winner = newState.snakes.find(s => s.id === newState.winnerId);
-      addLog(`Game Over! Winner: ${winner ? winner.name : 'None'}`);
+      const winner = newState.snakes.find((s) => s.id === newState.winnerId);
+      addLog({
+        snakeId: winner?.id,
+        type: "win",
+        message: `Game Over! Winner: ${winner ? winner.name : "None"}`,
+        data: { winnerId: newState.winnerId },
+      });
       reportResults(newState);
     }
     setIsProcessingTurn(false);
   }, [gameState, isProcessingTurn, reportResults]);
 
   useEffect(() => {
-    let interval: NodeJS.Timeout;
+    let timeout: NodeJS.Timeout;
     if (isRunning && gameState && !gameState.isGameOver && !isProcessingTurn) {
-      interval = setInterval(runTurn, speed);
+      timeout = setTimeout(runTurn, speed);
     }
-    return () => clearInterval(interval);
+    return () => clearTimeout(timeout);
   }, [isRunning, gameState, speed, runTurn, isProcessingTurn]);
+
+  const handleModelChange = (snakeId: string, newModel: string) => {
+    engine.current.updateSnakeModel(snakeId, newModel);
+    setGameState(engine.current.getState());
+  };
 
   if (!gameState) return <div>Loading...</div>;
 
   return (
-    <div className="flex flex-col lg:flex-row gap-8 w-full">
-      <div className="flex-1 flex flex-col gap-4">
+    <div className="flex flex-col lg:flex-row gap-2 w-full h-screen p-2 box-border overflow-hidden">
+      <div className="flex-1 flex flex-col gap-2 h-full overflow-y-auto">
         {/* Header Controls */}
-        <div className="flex flex-wrap justify-between items-center gap-4 bg-zinc-900 p-4 rounded-lg border border-zinc-800">
-          <div className="flex items-center gap-4">
-            <h2 className="text-2xl font-bold font-mono text-zinc-100">
-              TURN <span className="text-blue-400">{gameState.turn.toString().padStart(3, '0')}</span>
-            </h2>
-            <div className="h-8 w-px bg-zinc-700"></div>
-            <div className="text-sm text-zinc-400 flex items-center gap-2">
-              Speed:
-              <select
-                value={speed}
-                onChange={(e) => setSpeed(Number(e.target.value))}
-                className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-200"
-              >
-                <option value={5000}>Normal (5s)</option>
-                <option value={1000}>Slow (1s)</option>
-                <option value={500}>Normal (0.5s)</option>
-                <option value={200}>Fast (0.2s)</option>
-                <option value={50}>Turbo (0.05s)</option>
-              </select>
-            </div>
+        <div className="flex flex-wrap justify-between items-center gap-2 bg-zinc-900 p-4 border border-zinc-800 shrink-0">
+          <div className="flex flex-col">
+            <h2 className="text-zinc-100">LLM BATTLESNAKE</h2>
+            <p className="text-zinc-400">
+              LLMs control a snake, last snake standing wins. Inspired by{" "}
+              <a href="https://play.battlesnake.com/" className="underline">
+                Battlesnake
+              </a>
+              .
+            </p>
           </div>
-
-          <div className="flex items-center gap-2">
-            <button
-              className={`px-6 py-2 rounded font-bold transition-all ${
-                isRunning
-                  ? 'bg-yellow-600 hover:bg-yellow-500 text-black'
-                  : 'bg-green-600 hover:bg-green-500 text-white'
-              }`}
-              onClick={() => setIsRunning(!isRunning)}
-              disabled={gameState.isGameOver}
-            >
-              {isRunning ? 'PAUSE' : 'START GAME'}
-            </button>
-            <button
-              className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 rounded text-zinc-300 border border-zinc-700 disabled:opacity-50"
-              onClick={() => runTurn()}
-              disabled={isRunning || gameState.isGameOver || isProcessingTurn}
-            >
-              Step
-            </button>
-            <button
-              className="px-4 py-2 bg-red-900/50 hover:bg-red-900/80 text-red-200 rounded border border-red-900"
-              onClick={() => {
-                setIsRunning(false);
-                const players = getRandomModels(4);
-                engine.current = new GameEngine();
-                engine.current.initializeGame(players);
-                setGameState(engine.current.getState());
-                setLogs([]);
-              }}
-            >
-              Reset
-            </button>
+          <div className="flex items-center gap-2 font-mono ml-auto">
+            {!gameState.isGameOver ? (
+              <button
+                className={`px-3 py-1 uppercase ${
+                  isRunning
+                    ? "bg-yellow-600 hover:bg-yellow-500 text-black"
+                    : "bg-green-700 hover:bg-green-500 text-white"
+                }`}
+                onClick={() => setIsRunning(!isRunning)}
+              >
+                {isRunning ? "Pause" : "Start Game"}
+              </button>
+            ) : (
+              <button
+                className="px-3 py-1 bg-red-900/50 hover:bg-red-900/80 text-red-200 border border-red-900 uppercase"
+                onClick={() => {
+                  setIsRunning(false);
+                  // Reset to default models on restart as well
+                  const players = getRandomModels(4, AVAILABLE_MODELS);
+                  engine.current = new GameEngine();
+                  engine.current.initializeGame(players);
+                  setGameState(engine.current.getState());
+                  setLogs([]);
+                  setLastLatencies({});
+                }}
+              >
+                Restart Game
+              </button>
+            )}
           </div>
         </div>
 
         <Board gameState={gameState} />
 
-        {/* Snake Cards */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
-          {gameState.snakes.map(snake => (
-            <div
-              key={snake.id}
-              className={`relative overflow-hidden p-4 rounded-lg border transition-all ${
-                snake.status === 'alive'
-                  ? 'border-zinc-700 bg-zinc-900 shadow-lg'
-                  : 'border-red-900/30 bg-zinc-950 opacity-60 grayscale-[0.5]'
-              }`}
-            >
-              <div className="flex justify-between items-start mb-3">
-                <div className="flex items-center gap-2">
-                  <div className="w-4 h-4 rounded shadow-sm ring-1 ring-white/10" style={{ backgroundColor: snake.color }} />
-                  <div>
-                    <div className="font-bold text-zinc-100 leading-none">{snake.name}</div>
-                    <div className="text-xs font-mono text-zinc-500 mt-1">{snake.model.split('/')[1]}</div>
-                  </div>
-                </div>
-                {snake.status === 'alive' && (
-                  <div className="px-2 py-0.5 bg-green-900/30 text-green-400 text-xs rounded-full border border-green-900/50">
-                    ALIVE
-                  </div>
-                )}
-              </div>
-
-              <div className="space-y-2">
-                <div>
-                  <div className="flex justify-between text-xs mb-1">
-                    <span className="text-zinc-500">Health</span>
-                    <span className="text-zinc-300 font-mono">{snake.health}%</span>
-                  </div>
-                  <div className="h-1.5 bg-zinc-800 rounded-full overflow-hidden">
-                    <div
-                      className="h-full transition-all duration-300"
-                      style={{
-                        width: `${snake.health}%`,
-                        backgroundColor: snake.health > 50 ? '#22c55e' : snake.health > 20 ? '#eab308' : '#ef4444'
-                      }}
-                    />
-                  </div>
-                </div>
-
-                <div className="flex justify-between items-end border-t border-zinc-800 pt-2 mt-2">
-                  <div className="text-xs text-zinc-500">Length</div>
-                  <div className="text-xl font-mono font-bold text-zinc-200">{snake.length}</div>
-                </div>
-
-                {snake.status === 'eliminated' && (
-                  <div className="absolute inset-0 bg-black/60 flex items-center justify-center backdrop-blur-[1px]">
-                    <div className="text-center transform -rotate-12">
-                      <div className="text-2xl font-black text-red-500 uppercase tracking-widest border-4 border-red-500 px-2">
-                        DEAD
-                      </div>
-                      <div className="text-xs text-red-300 font-mono mt-1 bg-black/80 px-1">
-                        {snake.eliminationReason}
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
+        {/* Leaderboard */}
+        <Leaderboard data={leaderboardData} />
       </div>
 
       {/* Sidebar */}
-      <div className="w-full lg:w-80 flex flex-col gap-4 shrink-0">
-        <Leaderboard data={leaderboardData} />
+      <div className="w-full lg:w-96 flex flex-col gap-0 shrink-0 font-mono h-full border border-zinc-800 bg-zinc-950 overflow-hidden">
+        {gameState.snakes.map((snake) => {
+          const isThinking = thinkingSnakes.has(snake.id);
+          const averageLatency =
+            snake.latency && snake.latency.length > 0
+              ? Math.round(
+                  snake.latency.reduce((a, b) => a + b, 0) /
+                    snake.latency.length
+                )
+              : 0;
+          const lastLatency =
+            lastLatencies[snake.id] ??
+            (snake.latency[snake.latency.length - 1] || 0);
 
-        <div className="bg-zinc-900 border border-zinc-800 rounded p-4 flex-1 flex flex-col min-h-[300px]">
-          <h3 className="font-bold mb-2 text-zinc-400 uppercase text-xs tracking-wider flex justify-between items-center">
-            Game Log
-            <span className="text-[10px] bg-zinc-800 px-1.5 py-0.5 rounded text-zinc-500">{logs.length} events</span>
-          </h3>
-          <div className="flex-1 overflow-y-auto font-mono text-xs space-y-1.5 pr-2 custom-scrollbar">
-            {logs.map((log, i) => (
-              <div key={i} className="text-zinc-400 border-b border-zinc-800/50 pb-1 last:border-0">
-                {log}
+          const snakeLogs = logs.filter((l) => l.snakeId === snake.id);
+
+          return (
+            <div
+              key={snake.id}
+              className="flex flex-col border-b border-zinc-800 last:border-0 flex-1 min-h-0"
+            >
+              {/* Snake Header */}
+              <div
+                className={`relative overflow-hidden px-3 py-2 transition-all font-mono ${
+                  snake.status === "alive"
+                    ? "bg-zinc-900"
+                    : "bg-zinc-950 opacity-60 grayscale-[0.5]"
+                }`}
+              >
+                <div className="flex justify-between items-start mb-1">
+                  <div className="flex items-center gap-2">
+                    <div
+                      className="size-3 shadow-sm ring-1 ring-white/10"
+                      style={{ backgroundColor: snake.color }}
+                    />
+                    <div>
+                      <select
+                        className="bg-transparent text-zinc-100 text-sm font-bold border-none focus:ring-0 p-0 cursor-pointer max-w-[260px] truncate"
+                        value={snake.model}
+                        onChange={(e) =>
+                          handleModelChange(snake.id, e.target.value)
+                        }
+                        disabled={isRunning || snake.status === "eliminated"}
+                      >
+                        {availableModels.length > 0
+                          ? availableModels.map((model) => (
+                              <option
+                                key={model.id}
+                                value={model.id}
+                                className="bg-zinc-900 text-zinc-100"
+                              >
+                                {model.id}
+                              </option>
+                            ))
+                          : AVAILABLE_MODELS.map((m) => (
+                              <option
+                                key={m}
+                                value={m}
+                                className="bg-zinc-900 text-zinc-100"
+                              >
+                                {m}
+                              </option>
+                            ))}
+                      </select>
+                    </div>
+                  </div>
+                  {isThinking && (
+                    <div className="text-[10px] text-yellow-500 animate-pulse font-bold uppercase tracking-wider">
+                      Thinking...
+                    </div>
+                  )}
+                </div>
+
+                <div className="space-y-0 flex justify-between text-xs">
+                  <div className="grid grid-cols-4 gap-3 w-full text-right">
+                    <div className="flex flex-col">
+                      <span className="text-zinc-500">HEALTH</span>
+                      <span className="text-zinc-300">{snake.health}%</span>
+                    </div>
+                    <div className="flex flex-col">
+                      <div className="text-zinc-500 uppercase">Length</div>
+                      <div className="text-zinc-200">{snake.length}</div>
+                    </div>
+                    <div className="flex flex-col">
+                      <div className="text-zinc-500 uppercase">LATENCY</div>
+                      <div className="text-zinc-200">{lastLatency}ms</div>
+                    </div>
+                    <div className="flex flex-col">
+                      <div className="text-zinc-500 uppercase">AVG LATENCY</div>
+                      <div className="text-zinc-200">{averageLatency}ms</div>
+                    </div>
+                  </div>
+                </div>
               </div>
-            ))}
-            {logs.length === 0 && (
-              <div className="h-full flex items-center justify-center text-zinc-700 italic text-sm">
-                Ready to start...
+
+              {/* Snake Logs */}
+              <div className="flex-1 min-h-0 overflow-y-auto bg-zinc-900/50 p-2 space-y-2 custom-scrollbar border-t border-zinc-800/50">
+                {snakeLogs.length === 0 && (
+                  <div className="text-zinc-600 text-xs italic text-center py-4">
+                    No logs yet
+                  </div>
+                )}
+                {snakeLogs.map((log) => (
+                  <div key={log.id} className="text-xs font-mono">
+                    <div className="flex gap-2 mb-0.5">
+                      <span className="text-zinc-500 text-[10px] pt-0.5">
+                        T{log.turn}
+                      </span>
+                      <span
+                        className={`font-bold ${
+                          log.type === "death"
+                            ? "text-red-400"
+                            : log.type === "win"
+                            ? "text-yellow-400"
+                            : "text-blue-300"
+                        }`}
+                      >
+                        {log.type === "move"
+                          ? log.data?.move?.toUpperCase()
+                          : log.type.toUpperCase()}
+                      </span>
+                    </div>
+                    {log.data?.reason && (
+                      <div className="text-zinc-400 pl-6 text-[11px] leading-tight italic border-l-2 border-zinc-800 ml-1">
+                        &quot;{log.data.reason}&quot;
+                      </div>
+                    )}
+                    {log.type === "death" && log.data?.eliminationReason && (
+                      <div className="text-red-300 pl-6 text-[11px]">
+                        Reason: {log.data.eliminationReason}
+                      </div>
+                    )}
+                  </div>
+                ))}
               </div>
-            )}
-          </div>
-        </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
