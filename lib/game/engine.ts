@@ -219,7 +219,7 @@ export class GameEngine {
 
       const nextBody = nextBodies.get(snake.id)!;
       const eats = eatsFood.get(snake.id);
-      let health = snake.health - 10;
+      let health = snake.health - 3;
       let length = snake.length;
 
       if (eats) {
